@@ -287,7 +287,7 @@ impl Miner {
         eprintln!("An error occurred: {:?}", e);
 
         // Run the CLI command
-        let command = "your-cli-command-here"; // Replace with your actual command
+        let command = "ore mine --cores 32 --priority-fee 12000"; // Replace with your actual miner command
         if let Err(cmd_err) = Command::new("sh")
             .arg("-c")
             .arg(command)
