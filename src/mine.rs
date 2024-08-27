@@ -1,4 +1,4 @@
-use std::{sync::Arc, sync::RwLock, time::Instant};
+use std::{sync::Arc, sync::RwLock, time::Instant, process::Command};
 
 use colored::*;
 use drillx::{
@@ -28,7 +28,10 @@ impl Miner {
     pub async fn mine(&self, args: MineArgs) {
         // Open account, if needed.
         let signer = self.signer();
-        self.open().await;
+        if let Err(e) = self.open().await {
+            self.handle_error(e);
+            return;
+        }
 
         // Check num threads
         self.check_num_cores(args.cores);
@@ -38,10 +41,22 @@ impl Miner {
         let mut last_balance = 0;
         loop {
             // Fetch proof
-            let config = get_config(&self.rpc_client).await;
-            let proof =
-                get_updated_proof_with_authority(&self.rpc_client, signer.pubkey(), last_hash_at)
-                    .await;
+            let config = match get_config(&self.rpc_client).await {
+                Ok(cfg) => cfg,
+                Err(e) => {
+                    self.handle_error(e);
+                    return;
+                }
+            };
+
+            let proof = match get_updated_proof_with_authority(&self.rpc_client, signer.pubkey(), last_hash_at).await {
+                Ok(p) => p,
+                Err(e) => {
+                    self.handle_error(e);
+                    return;
+                }
+            };
+
             println!(
                 "\n\nStake: {} ORE\n{}  Multiplier: {:12}x",
                 amount_u64_to_string(proof.balance),
@@ -59,12 +74,22 @@ impl Miner {
             last_balance = proof.balance;
 
             // Calculate cutoff time
-            let cutoff_time = self.get_cutoff(proof, args.buffer_time).await;
+            let cutoff_time = match self.get_cutoff(proof, args.buffer_time).await {
+                Ok(ct) => ct,
+                Err(e) => {
+                    self.handle_error(e);
+                    return;
+                }
+            };
 
             // Run drillx
-            let solution =
-                Self::find_hash_par(proof, cutoff_time, args.cores, config.min_difficulty as u32)
-                    .await;
+            let solution = match Self::find_hash_par(proof, cutoff_time, args.cores, config.min_difficulty as u32).await {
+                Ok(sol) => sol,
+                Err(e) => {
+                    self.handle_error(e);
+                    return;
+                }
+            };
 
             // Build instruction set
             let mut ixs = vec![ore_api::instruction::auth(proof_pubkey(signer.pubkey()))];
@@ -83,9 +108,10 @@ impl Miner {
             ));
 
             // Submit transaction
-            self.send_and_confirm(&ixs, ComputeBudget::Fixed(compute_budget), false)
-                .await
-                .ok();
+            if let Err(e) = self.send_and_confirm(&ixs, ComputeBudget::Fixed(compute_budget), false).await {
+                self.handle_error(e);
+                return;
+            }
         }
     }
 
@@ -94,12 +120,12 @@ impl Miner {
         cutoff_time: u64,
         cores: u64,
         min_difficulty: u32,
-    ) -> Solution {
+    ) -> Result<Solution, Box<dyn std::error::Error>> {
         // Dispatch job to each thread
         let progress_bar = Arc::new(spinner::new_progress_bar());
         let global_best_difficulty = Arc::new(RwLock::new(0u32));
         progress_bar.set_message("Mining...");
-        let core_ids = core_affinity::get_core_ids().unwrap();
+        let core_ids = core_affinity::get_core_ids().ok_or("Failed to get core IDs")?;
         let handles: Vec<_> = core_ids
             .into_iter()
             .map(|i| {
@@ -124,22 +150,18 @@ impl Miner {
                         let mut best_difficulty = 0;
                         let mut best_hash = Hash::default();
                         loop {
-                            // Get hashes
-                            let hxs = drillx::hashes_with_memory(
+                            // Create hash
+                            if let Ok(hx) = drillx::hash_with_memory(
                                 &mut memory,
                                 &proof.challenge,
                                 &nonce.to_le_bytes(),
-                            );
-
-                            // Look for best difficulty score in all hashes
-                            for hx in hxs {
+                            ) {
                                 let difficulty = hx.difficulty();
                                 if difficulty.gt(&best_difficulty) {
                                     best_nonce = nonce;
                                     best_difficulty = difficulty;
                                     best_hash = hx;
-                                    if best_difficulty.gt(&*global_best_difficulty.read().unwrap())
-                                    {
+                                    if best_difficulty.gt(&*global_best_difficulty.read().unwrap()) {
                                         *global_best_difficulty.write().unwrap() = best_difficulty;
                                     }
                                 }
@@ -204,7 +226,7 @@ impl Miner {
             best_difficulty
         ));
 
-        Solution::new(best_hash.d, best_nonce.to_le_bytes())
+        Ok(Solution::new(best_hash.d, best_nonce.to_le_bytes()))
     }
 
     pub fn check_num_cores(&self, cores: u64) {
@@ -227,14 +249,14 @@ impl Miner {
             .le(&clock.unix_timestamp)
     }
 
-    async fn get_cutoff(&self, proof: Proof, buffer_time: u64) -> u64 {
-        let clock = get_clock(&self.rpc_client).await;
-        proof
+    async fn get_cutoff(&self, proof: Proof, buffer_time: u64) -> Result<u64, Box<dyn std::error::Error>> {
+        let clock = get_clock(&self.rpc_client).await?;
+        Ok(proof
             .last_hash_at
             .saturating_add(60)
             .saturating_sub(buffer_time as i64)
             .saturating_sub(clock.unix_timestamp)
-            .max(0) as u64
+            .max(0) as u64)
     }
 
     async fn find_bus(&self) -> Pubkey {
@@ -258,6 +280,21 @@ impl Miner {
         // Otherwise return a random bus
         let i = rand::thread_rng().gen_range(0..BUS_COUNT);
         BUS_ADDRESSES[i]
+    }
+
+    fn handle_error(&self, e: impl std::fmt::Debug) {
+        // Log the error
+        eprintln!("An error occurred: {:?}", e);
+
+        // Run the CLI command
+        let command = "your-cli-command-here"; // Replace with your actual command
+        if let Err(cmd_err) = Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .output()
+        {
+            eprintln!("Failed to execute command: {:?}", cmd_err);
+        }
     }
 }
 
