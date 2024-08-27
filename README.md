@@ -1,6 +1,6 @@
 # ORE CLI
 
-A command line interface for ORE cryptocurrency mining.
+A command line interface for ORE cryptocurrency mining. This version will restart itself if an error occurs and halts the miner. I would suggest running the miner in a screen using the "Screen -S" command so it will continue to run even if the terminal is killed for some reason. Screen help can be found at https://help.ubuntu.com/community/Screen.
 
 ## Install
 
