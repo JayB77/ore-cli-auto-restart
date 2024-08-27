@@ -9,7 +9,7 @@ To install the CLI, use [cargo](https://doc.rust-lang.org/cargo/getting-started/
 ```sh
 cargo install ore-cli
 ```
-### Edit the CLI Restart Command.
+### Edit the CLI Restart Command in main.rs
 Replace "your-cli-command-here" with something like: ore mine --cores 32 --priority-fee 10000
 ```sh
 // Run the CLI command
